@@ -1,0 +1,53 @@
+{
+  "name": "vibe-flow",
+  "displayName": "Vibe Flow",
+  "description": "Vibe Flow is an extension to assist vibe coders by tracking flow, AI acceptance/rejection, and mood.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+    
+    
+    
+    
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vibeflow.reportMood",
+        "title": "VibeFlow: Report Mood"
+      },
+      {
+        "command": "vibeflow.exportLogs",
+        "title": "VibeFlow: Export Logs"
+      },
+      {
+        "command": "vibeflow.openDashboard",
+        "title": "VibeFlow: Open Dashboard"
+      },
+      {
+        "command": "vibeflow.toggleAssist",
+        "title": "VibeFlow: Toggle Assist"
+      }
+    ]
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.104.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "eslint": "^9.34.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2"
+  }
+}
