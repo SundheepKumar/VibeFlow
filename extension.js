@@ -85,7 +85,7 @@ function activate(context) {
     globalState.update(EVENTS_KEY, events);
   }
 
-// Demo-friendly computeFlow()
+
 function computeFlow() {
   const total = Math.max(1, metrics.totalInsertions);
   const acceptRate = Math.min(1, metrics.aiInsertions / total);
@@ -93,7 +93,7 @@ function computeFlow() {
   const undoRate = Math.min(1, metrics.undoCount / total);
 
   const idleSec = (Date.now() - metrics.lastChangeTs) / 1000;
-  const idleFactor = Math.min(1, idleSec / 300); // 5-minute scaling instead of 60s
+  const idleFactor = Math.min(1, idleSec / 300); 
 
   const raw = 30 
             + acceptRate * 50 
