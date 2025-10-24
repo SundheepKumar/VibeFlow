@@ -1,57 +1,35 @@
 const vscode = require("vscode");
-const fs = require("fs");
-const path = require("path");
 
 /**
- * VibeFlow JS extension
- * - detects AI acceptances (heuristic)
- * - manual AI rejection logging
- * - computes Flow Score
- * - collects mood reports
- * - nudges on low flow
- * - logs history/events/moods
- * - exports JSON
- * - dashboard webview with Chart.js
+ * VibeFlow – VS Code Flow/Mood Tracker
+ * Now includes dashboard handshake debug logging
  */
 
 function activate(context) {
-  // Status bar items
-  const statusBar = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Left,
-    100
-  );
+  const activity = []; // track typing events
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.text = "VibeFlow: initializing...";
   statusBar.show();
   context.subscriptions.push(statusBar);
 
-  const moodBar = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Left,
-    99
-  );
+  const moodBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
   moodBar.text = "VibeFlow: Report Mood";
   moodBar.command = "vibeflow.reportMood";
   moodBar.show();
   context.subscriptions.push(moodBar);
 
-  const assistBar = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Left,
-    98
-  );
+  const assistBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
   assistBar.text = "VibeFlow Assist: OFF";
   assistBar.command = "vibeflow.toggleAssist";
   assistBar.show();
   context.subscriptions.push(assistBar);
 
-  const rejectBar = vscode.window.createStatusBarItem(
-    vscode.StatusBarAlignment.Left,
-    97
-  );
+  const rejectBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
   rejectBar.text = "VibeFlow: Reject AI";
   rejectBar.command = "vibeflow.logAIReject";
   rejectBar.show();
   context.subscriptions.push(rejectBar);
 
-  // Metrics and persisted state
   const HISTORY_KEY = "vibeflow.history";
   const MOODS_KEY = "vibeflow.moods";
   const EVENTS_KEY = "vibeflow.events";
@@ -63,7 +41,6 @@ function activate(context) {
   let events = globalState.get(EVENTS_KEY, []);
   let assistMode = globalState.get(ASSIST_KEY, false);
 
-  // Runtime metrics
   const metrics = {
     lastChangeTs: Date.now(),
     totalInsertions: 0,
@@ -85,92 +62,105 @@ function activate(context) {
     globalState.update(EVENTS_KEY, events);
   }
 
+  function computeFlow() {
+    const now = Date.now();
+    const windowSize = 60000; // last 60s
+    const recent = activity.filter(a => now - a.ts < windowSize);
 
-function computeFlow() {
-  const total = Math.max(1, metrics.totalInsertions);
-  const acceptRate = Math.min(1, metrics.aiInsertions / total);
-  const rejectPenalty = Math.min(1, metrics.aiRejections / (metrics.aiInsertions + metrics.aiRejections + 1));
-  const undoRate = Math.min(1, metrics.undoCount / total);
+    let keystrokeScore = 0;
+    recent.forEach(a => {
+      const ageSec = (now - a.ts) / 1000;
+      const weight = Math.max(0, 1 - ageSec / 60);
+      keystrokeScore += weight * Math.min(a.size || 1, 20);
+    });
+    keystrokeScore = Math.min(keystrokeScore, 50);
 
-  const idleSec = (Date.now() - metrics.lastChangeTs) / 1000;
-  const idleFactor = Math.min(1, idleSec / 300); 
+    const gaps = recent.map((a, i) => (i === 0 ? 0 : a.ts - recent[i - 1].ts));
+    const avgGap = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
+    const rhythmBonus = avgGap < 10000 ? Math.max(0, 20 - avgGap / 1000) : 0;
 
-  const raw = 30 
-            + acceptRate * 50 
-            - undoRate * 10 
-            - idleFactor * 10 
-            - rejectPenalty * 5 
-            + Math.floor(Math.random() * 10 - 5);
+    const lastActivity = recent.at(-1)?.ts || metrics.lastChangeTs || 0;
+    const idleTime = now - lastActivity;
+    const idleDecay = Math.min(50, idleTime / 1000); // 1pt/sec idle, max 50
 
-  return Math.max(0, Math.min(100, Math.round(raw)));
-}
+    const total = Math.max(1, metrics.totalInsertions);
+    const aiAcceptRate = Math.min(1, metrics.aiInsertions / total);
+    const undoPenalty = Math.min(1, metrics.undoCount / total);
 
+    const metricScore = 30 + aiAcceptRate * 30 - undoPenalty * 10;
+
+    let rawFlow = keystrokeScore + rhythmBonus - idleDecay + metricScore;
+    rawFlow += Math.floor(Math.random() * 6 - 3); // ±3
+
+    return Math.max(0, Math.min(100, Math.round(rawFlow)));
+  }
 
   let lastUpdate = 0;
   function updateStatus() {
     const now = Date.now();
-    if (now - lastUpdate < 1000) return;
+    if (now - lastUpdate < 1000) return; // throttle updates
     lastUpdate = now;
 
     const flow = computeFlow();
     statusBar.text = `VibeFlow: ${flow}`;
     statusBar.tooltip = `Flow Score: ${flow}`;
 
-    try {
-      if (flow >= 70) {
-        statusBar.color = undefined;
-        metrics.consecutiveLow = 0;
-      } else if (flow >= 40) {
-        statusBar.color = "#b36b00";
-        metrics.consecutiveLow = 0;
-      } else {
-        statusBar.color = "#a80000";
-        metrics.consecutiveLow++;
-      }
-    } catch (e) {}
+    if (flow >= 70) {
+      statusBar.color = undefined;
+      metrics.consecutiveLow = 0;
+    } else if (flow >= 45) {
+      statusBar.color = "#b36b00";
+      metrics.consecutiveLow = 0;
+    } else {
+      statusBar.color = "#a80000";
+      metrics.consecutiveLow++;
+    }
 
-    history.push({ ts: now, flow: flow });
-    if (history.length > 20000) history.shift();
-    globalState.update(HISTORY_KEY, history);
-
+    // --- Assist mode nudges ---
     if (assistMode && metrics.consecutiveLow >= 5) {
       metrics.consecutiveLow = 0;
-      vscode.window
-        .showInformationMessage(
-          "VibeFlow: low flow detected. Try a short break or request a hint.",
-          "Take Break",
-          "Request Hint",
-          "Ignore"
-        )
-        .then((choice) => {
-          if (choice === "Take Break") {
-            vscode.window.showInformationMessage(
-              "Take a 2-minute break. Step away and stretch."
-            );
-            logEvent({ type: "nudge", action: "break" });
-          } else if (choice === "Request Hint") {
-            vscode.window.showInformationMessage(
-              "Hint: isolate the problem; add logs or write a failing test."
-            );
-            logEvent({ type: "nudge", action: "hint" });
-          } else {
-            logEvent({ type: "nudge", action: "ignored" });
-          }
-        });
+      vscode.window.showInformationMessage(
+        "VibeFlow: low flow detected. Try a short break or request a hint.",
+        "Take Break",
+        "Request Hint",
+        "Ignore"
+      ).then(choice => {
+        if (choice === "Take Break") {
+          vscode.window.showInformationMessage("Take a 2-minute break. Step away and stretch.");
+          logEvent({ type: "nudge", action: "break" });
+        } else if (choice === "Request Hint") {
+          vscode.window.showInformationMessage("Hint: isolate the problem; add logs or write a failing test.");
+          logEvent({ type: "nudge", action: "hint" });
+        } else {
+          logEvent({ type: "nudge", action: "ignored" });
+        }
+      });
     }
+
+    // --- Log history ---
+    history.push({ ts: now, flow });
+    if (history.length > 20000) history.shift();
+    globalState.update(HISTORY_KEY, history);
   }
 
-  // Heuristic AI detection
+  // --- Typing listener ---
   context.subscriptions.push(
-    vscode.workspace.onDidChangeTextDocument((e) => {
-      metrics.lastChangeTs = Date.now();
+    vscode.workspace.onDidChangeTextDocument(e => {
+      const now = Date.now();
+      metrics.lastChangeTs = now;
+
       for (const change of e.contentChanges) {
-        const inserted = change.text ? change.text.length : 0;
+        const inserted = change.text?.length || 0;
         const removed = change.rangeLength || 0;
+
+        if (inserted > 0) activity.push({ ts: now, size: inserted });
+
+        const cutoff = now - 5 * 60 * 1000; // last 5 min
+        while (activity.length && activity[0].ts < cutoff) activity.shift();
 
         if (inserted > 0 && removed === 0) {
           metrics.totalInsertions += inserted;
-          if (inserted > 40 || (change.text && change.text.includes("\n"))) {
+          if (inserted > 40 || change.text.includes("\n")) {
             metrics.aiInsertions++;
             logEvent({ type: "ai.accept", size: inserted });
           } else {
@@ -183,72 +173,59 @@ function computeFlow() {
         } else if (removed > 0 && inserted > 0) {
           metrics.totalInsertions += inserted;
           metrics.totalDeletions += removed;
-          if (inserted > 40 || (change.text && change.text.includes("\n"))) {
+          if (inserted > 40 || change.text.includes("\n")) {
             metrics.aiInsertions++;
-            logEvent({
-              type: "ai.replace",
-              sizeInserted: inserted,
-              sizeRemoved: removed,
-            });
+            logEvent({ type: "ai.replace", sizeInserted: inserted, sizeRemoved: removed });
           } else {
-            logEvent({
-              type: "replace",
-              sizeInserted: inserted,
-              sizeRemoved: removed,
-            });
+            logEvent({ type: "replace", sizeInserted: inserted, sizeRemoved: removed });
           }
         }
       }
+
       updateStatus();
     })
   );
 
-  // Window focus idle tracking
+  // --- Window focus idle ---
   context.subscriptions.push(
-    vscode.window.onDidChangeWindowState((state) => {
-      if (!state.focused) {
-        metrics.lastChangeTs = Date.now() - 120000;
-        updateStatus();
-      }
+    vscode.window.onDidChangeWindowState(state => {
+      if (!state.focused) metrics.lastChangeTs = Date.now() - 120000;
+      updateStatus();
     })
   );
 
-  // Mood reporting
-  const reportMoodCmd = vscode.commands.registerCommand(
-    "vibeflow.reportMood",
-    async () => {
-      const pick = await vscode.window.showQuickPick(
-        ["Happy", "Neutral", "Stuck"],
-        { placeHolder: "How are you feeling now?" }
-      );
+  // --- Assist mode interval ---
+  const flowInterval = setInterval(updateStatus, 1000); // check flow every second
+  context.subscriptions.push({ dispose: () => clearInterval(flowInterval) });
+
+  // Mood report
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vibeflow.reportMood", async () => {
+      const pick = await vscode.window.showQuickPick(["Happy", "Neutral", "Stuck"], {
+        placeHolder: "How are you feeling now?",
+      });
       if (pick) {
         const entry = { ts: Date.now(), mood: pick };
         moods.push(entry);
         await globalState.update(MOODS_KEY, moods);
-        vscode.window.showInformationMessage(
-          `VibeFlow: mood recorded (${pick}).`
-        );
+        vscode.window.showInformationMessage(`VibeFlow: mood recorded (${pick}).`);
         logEvent({ type: "mood.report", mood: pick });
       }
-    }
+    })
   );
-  context.subscriptions.push(reportMoodCmd);
 
-  // Manual AI Rejection logging
-  const rejectCmd = vscode.commands.registerCommand(
-    "vibeflow.logAIReject",
-    async () => {
+  // Manual reject
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vibeflow.logAIReject", async () => {
       metrics.aiRejections++;
       logEvent({ type: "ai.reject" });
       vscode.window.showInformationMessage("VibeFlow: AI rejection logged.");
-    }
+    })
   );
-  context.subscriptions.push(rejectCmd);
 
   // Export logs
-  const exportCmd = vscode.commands.registerCommand(
-    "vibeflow.exportLogs",
-    async () => {
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vibeflow.exportLogs", async () => {
       const all = { history, moods, events };
       const content = JSON.stringify(all, null, 2);
       const uri = await vscode.window.showSaveDialog({
@@ -256,36 +233,27 @@ function computeFlow() {
         saveLabel: "Export VibeFlow Logs",
       });
       if (uri) {
-        try {
-          await vscode.workspace.fs.writeFile(
-            uri,
-            Buffer.from(content, "utf8")
-          );
-          vscode.window.showInformationMessage("VibeFlow: logs exported.");
-          logEvent({ type: "export", path: uri.fsPath });
-        } catch (err) {
-          vscode.window.showErrorMessage(
-            "VibeFlow: failed to export logs: " + err.message
-          );
-        }
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(content, "utf8"));
+        vscode.window.showInformationMessage("VibeFlow: logs exported.");
+        logEvent({ type: "export", path: uri.fsPath });
       }
-    }
+    })
   );
-  context.subscriptions.push(exportCmd);
 
-  // Dashboard
-  const openDashboardCmd = vscode.commands.registerCommand(
-    "vibeflow.openDashboard",
-    () => {
+  // Dashboard command
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vibeflow.openDashboard", () => {
       const panel = vscode.window.createWebviewPanel(
         "vibeflowDashboard",
         "VibeFlow Dashboard",
         vscode.ViewColumn.One,
         { enableScripts: true }
       );
+
       panel.webview.html = getDashboardHtml();
-      setTimeout(() => {
-        // Ensure history & moods are never empty
+
+      function sendInitData() {
+        console.log("Preparing to send init data to webview...");
         const demoHistory = history.length
           ? history.slice(-1000)
           : [
@@ -298,34 +266,37 @@ function computeFlow() {
           ? moods
           : [{ ts: Date.now() - 45000, mood: "Neutral" }];
 
-        panel.webview.postMessage({
-          command: "init",
-          data: {
-            history: demoHistory,
-            moods: demoMoods,
-            events,
-            metrics,
-          },
-        });
-      }, 100); // shorter timeout for faster rendering
-    }
-  );
-  context.subscriptions.push(openDashboardCmd);
+        const payload = { command: "init", data: { history: demoHistory, moods: demoMoods, events, metrics } };
+        console.log("Sending payload:", payload);
+        panel.webview.postMessage(payload);
+      }
 
-  // Toggle Assist
-  const toggleAssistCmd = vscode.commands.registerCommand(
-    "vibeflow.toggleAssist",
-    async () => {
+      panel.webview.onDidReceiveMessage((msg) => {
+        console.log("VibeFlow: received message from webview:", msg);
+        if (msg.command === "ready") {
+          vscode.window.showInformationMessage("Webview ready — sending data!");
+          sendInitData();
+        }
+      });
+
+      // Fallback in case "ready" message fails
+      setTimeout(() => {
+        vscode.window.showInformationMessage("Fallback: sending data directly after 2s");
+        sendInitData();
+      }, 2000);
+    })
+  );
+
+  // Assist toggle
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vibeflow.toggleAssist", async () => {
       assistMode = !assistMode;
       await globalState.update(ASSIST_KEY, assistMode);
       updateAssistBar();
-      vscode.window.showInformationMessage(
-        `VibeFlow: Assist mode ${assistMode ? "enabled" : "disabled"}.`
-      );
+      vscode.window.showInformationMessage(`VibeFlow: Assist mode ${assistMode ? "enabled" : "disabled"}.`);
       logEvent({ type: "assist.toggle", enabled: assistMode });
-    }
+    })
   );
-  context.subscriptions.push(toggleAssistCmd);
 
   updateStatus();
 
@@ -333,7 +304,7 @@ function computeFlow() {
     return `<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
   <title>VibeFlow Dashboard</title>
   <style>
     body { font-family: -apple-system, Roboto, Arial; margin: 10px; }
@@ -342,6 +313,7 @@ function computeFlow() {
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
     th, td { border: 1px solid #ddd; padding: 6px; font-size: 12px; text-align: left; }
     th { background: #f3f3f3; }
+    pre { white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -350,53 +322,59 @@ function computeFlow() {
   <h3>Mood Reports</h3>
   <table id="moodTable"><thead><tr><th>Time</th><th>Mood</th></tr></thead><tbody></tbody></table>
   <h3>AI Stats</h3>
-  <div id="aiStats"></div>
+  <pre id="aiStats"></pre>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
     const vscode = acquireVsCodeApi();
-    let chart = null;
+    console.log("VibeFlow webview script loaded!");
 
-    window.addEventListener('message', event => {
+    window.addEventListener("load", () => {
+      console.log("Webview loaded — posting ready message");
+      vscode.postMessage({ command: "ready" });
+    });
+
+    window.addEventListener("message", event => {
       const msg = event.data;
-      if (msg.command === 'init') {
+      console.log("Received message from extension:", msg);
+      if (msg.command === "init") {
         renderChart(msg.data.history || []);
         renderMoods(msg.data.moods || []);
         renderAIStats(msg.data.metrics || {});
       }
     });
 
+    let chart = null;
     function renderChart(history) {
       const labels = history.map(h => new Date(h.ts).toLocaleTimeString());
       const data = history.map(h => h.flow);
-      const ctx = document.getElementById('flowChart').getContext('2d');
+      const ctx = document.getElementById("flowChart").getContext("2d");
       if (chart) chart.destroy();
       chart = new Chart(ctx, {
-        type: 'line',
-        data: { labels, datasets: [{ label: 'Flow Score', data, borderWidth: 2, fill: false, tension: 0.2 }] },
+        type: "line",
+        data: { labels, datasets: [{ label: "Flow Score", data, borderWidth: 2, fill: false, tension: 0.2 }] },
         options: { scales: { y: { min: 0, max: 100 } } }
       });
     }
 
     function renderMoods(moods) {
-      const tbody = document.querySelector('#moodTable tbody');
-      tbody.innerHTML = '';
+      const tbody = document.querySelector("#moodTable tbody");
+      tbody.innerHTML = "";
       moods.slice().reverse().forEach(m => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = '<td>' + new Date(m.ts).toLocaleString() + '</td><td>' + m.mood + '</td>';
+        const tr = document.createElement("tr");
+        tr.innerHTML = "<td>" + new Date(m.ts).toLocaleString() + "</td><td>" + m.mood + "</td>";
         tbody.appendChild(tr);
       });
     }
 
     function renderAIStats(metrics) {
-		const aiAccept = metrics.aiInsertions || 0;
-		const aiReject = metrics.aiRejections || 0;
-		const ratio = (aiAccept + aiReject) > 0 ? (aiAccept / (aiAccept + aiReject) * 100).toFixed(1) : 'N/A';
-		document.getElementById('aiStats').innerText =
-    'AI Acceptances: ' + aiAccept + '\n' +
-    'AI Rejections: ' + aiReject + '\n' +
-    'Accept/Reject Ratio: ' + ratio + '%';
-}
-
+      const aiAccept = metrics.aiInsertions || 0;
+      const aiReject = metrics.aiRejections || 0;
+      const ratio = (aiAccept + aiReject) > 0 ? (aiAccept / (aiAccept + aiReject) * 100).toFixed(1) : "N/A";
+      document.getElementById("aiStats").innerText =
+        "AI Acceptances: " + aiAccept + "\\n" +
+        "AI Rejections: " + aiReject + "\\n" +
+        "Accept/Reject Ratio: " + ratio + "%";
+    }
   </script>
 </body>
 </html>`;
